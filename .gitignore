@@ -1,2 +1,6 @@
 storage/
 chrome_db/
+venv/
+.DS_Store
+.idea/
+__pycache__/
