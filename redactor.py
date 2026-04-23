@@ -1,13 +1,13 @@
 from abc import ABC, abstractmethod
-from typing import Any, Union
-from presidio_analyzer import AnalyzerEngine
-from presidio_anonymizer import AnonymizerEngine
-from presidio_anonymizer.entities import OperatorConfig
+from typing import Any
 import cv2
 import numpy as np
 import pytesseract
 from pytesseract import Output
-
+from presidio_analyzer import AnalyzerEngine, RecognizerRegistry
+from presidio_analyzer.nlp_engine import NlpEngineProvider
+from presidio_anonymizer import AnonymizerEngine
+from presidio_anonymizer.entities import OperatorConfig
 
 class BaseRedactor(ABC):
     """
@@ -27,28 +27,39 @@ class BaseRedactor(ABC):
 
 class TextRedactor(BaseRedactor):
     def __init__(self):
-        # Initialize engines once to save memory on M1 Pro
-        self.analyzer = AnalyzerEngine()
+        conf = {
+            "nlp_engine_name": "spacy",
+            "models": [{"lang_code": "en", "model_name": "en_core_web_trf"}],
+        }
+        provider = NlpEngineProvider(nlp_configuration=conf)
+        self.analyzer = AnalyzerEngine(nlp_engine=provider.create_engine())
         self.anonymizer = AnonymizerEngine()
 
         # Define specific behaviors for common PII
         self.operators = {
-            "PERSON": OperatorConfig("replace", {"new_value": "<REDACTED_NAME>"}),
-            "PHONE_NUMBER": OperatorConfig("mask", {"masking_char": "*", "chars_to_mask": 10, "from_end": True}),
-            "EMAIL_ADDRESS": OperatorConfig("replace", {"new_value": "<REDACTED_EMAIL>"}),
-            "LOCATION": OperatorConfig("replace", {"new_value": "<REDACTED_LOC>"}),
+            "PERSON": OperatorConfig("replace", {"new_value": "<NAME>"}),
+            "ORG": OperatorConfig("replace", {"new_value": "<COMPANY>"}),
+            "EMAIL_ADDRESS": OperatorConfig("replace", {"new_value": "<EMAIL>"}),
+            "LOCATION": OperatorConfig("replace", {"new_value": "<LOCATION>"}),
+            "PHONE_NUMBER": OperatorConfig("replace", {"new_value": "<PHONENUMBER>"}),
         }
 
     def redact(self, text: str) -> str:
         if not text.strip():
             return text
 
-        results = self.analyzer.analyze(text=text, language='en')
+        results = self.analyzer.analyze(
+            text=text,
+            language='en',
+            entities=["PERSON", "ORG", "EMAIL_ADDRESS", "LOCATION", "PHONE_NUMBER"]
+        )
+
         anonymized = self.anonymizer.anonymize(
             text=text,
             analyzer_results=results,
             operators=self.operators
         )
+
         return anonymized.text
 
 

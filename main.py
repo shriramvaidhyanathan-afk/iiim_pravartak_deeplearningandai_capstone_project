@@ -1,9 +1,11 @@
 import logging
+import traceback
 
 import streamlit as st
 import os
 import tempfile
 from graph import ChatBot, ChatHistory
+from redactor import TextRedactor
 from traceabilitymanager import trace_manager, TraceabilityManager
 
 
@@ -47,6 +49,8 @@ def initialize_session():
         st.session_state.messages = []
     if "processing" not in st.session_state:
         st.session_state.processing = False
+    if "feedback_scores" not in st.session_state:
+        st.session_state.feedback_scores = {}
     if "chat_state" not in st.session_state:
         st.session_state.chat_state = {
             "uploaded_pdf_paths": [],
@@ -74,6 +78,7 @@ def clear_session():
         "cancel_run": False
     }
     trace_manager.hard_reset()
+    st.session_state.feedback_scores = {}
     st.rerun()
 
 
@@ -97,10 +102,15 @@ def process_uploaded_files(uploaded_files):
     return temp_paths
 
 
+def get_feedback_interaction_index(index):
+    return index // 2
+
+
 def run_pipeline(bot, prompt, temp_paths, status_placeholder):
     try:
         state = st.session_state.chat_state
-        state["current_request"] = prompt
+        redactor = TextRedactor()
+        state["current_request"] = redactor.redact(prompt)
         state["uploaded_pdf_paths"] = temp_paths
 
         response_state = bot.invoke(state)
@@ -115,10 +125,16 @@ def run_pipeline(bot, prompt, temp_paths, status_placeholder):
         st.session_state.messages.append({"role": "Assistant", "content": response_state["current_response"]})
         st.session_state.chat_state = response_state
 
-        trace_manager.track_interaction(prompt, response_state["current_response"])
+        index = get_feedback_interaction_index(len(st.session_state.messages)) - 1
+        trace_manager.track_interaction(index, prompt, state["current_request"],
+                                        response_state["current_response"])
 
     except Exception as e:
         st.error(f"Error: {str(e)}")
+        message = "An error occurred. Please check the logs"
+        st.session_state.messages.append({"role": "Assistant", "content": message})
+        trace_manager.track_interaction(prompt, state["current_request"], message)
+        logging.error(e, exc_info=True)
 
     finally:
         for p in temp_paths:
@@ -127,94 +143,117 @@ def run_pipeline(bot, prompt, temp_paths, status_placeholder):
 
 # --- 5. UI LAYOUT ---
 def main():
-    try:
-        setup_page()
-        initialize_session()
+    setup_page()
+    initialize_session()
 
-        # Sidebar
-        with st.sidebar:
-            st.header("Settings")
+    # Sidebar
+    with st.sidebar:
+        st.header("Settings")
 
-            # --- NEW: Conversation ID UI Element ---
-            conv_id = trace_manager.conversation_id
-            st.markdown(f"""
-                        <div style="background-color: #1e2630; padding: 15px; border-radius: 10px; border: 1px solid #343d46; margin-bottom: 20px;">
-                            <p style="color: #8892b0; font-size: 0.8rem; margin-bottom: 5px; text-transform: uppercase; letter-spacing: 1px;">Current Session ID</p>
-                            <code style="color: #117aca; font-size: 1rem; font-weight: bold;">{conv_id}</code>
-                        </div>
-                    """, unsafe_allow_html=True)
-
-            model = st.selectbox("Choose model", ["gemma4:e4b", "phi3:mini"], disabled=st.session_state.processing)
-            st.divider()
-            files = st.file_uploader("Upload PDFs", type="pdf", accept_multiple_files=True,
-                                     disabled=st.session_state.processing)
-            if st.button("Clear Session", disabled=st.session_state.processing):
-                clear_session()
-
-        # Main Chat
-        st.subheader("PDF Assistant")
-        status_container = st.empty()
-
-        # Display History
-        for msg in st.session_state.messages:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
-
-        # add the gif if processing is on going
-        # Create an empty placeholder for the loading state
-        loading_placeholder = st.empty()
-        if st.session_state.processing:
-            # Replace the placeholder with a GIF
-            with loading_placeholder.container():
-                st.markdown(
-                    """
-                    <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 20px;">
-                        <img src="https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExNHJueXF4ZzRnd3B6eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4JmVwPXYxX2ludGVybmFsX2dpZl9ieV9pZCBjdXN0b20mY3Q9Zw/3o7bu3XilJ5BOiSGic/giphy.gif" width="100">
-                        <p style="color: #117aca; font-weight: bold; margin-top: 10px;">Bot is thinking...</p>
+        # --- NEW: Conversation ID UI Element ---
+        conv_id = trace_manager.conversation_id
+        st.markdown(f"""
+                    <div style="background-color: #1e2630; padding: 15px; border-radius: 10px; border: 1px solid #343d46; margin-bottom: 20px;">
+                        <p style="color: #8892b0; font-size: 0.8rem; margin-bottom: 5px; text-transform: uppercase; letter-spacing: 1px;">Current Session ID</p>
+                        <code style="color: #117aca; font-size: 1rem; font-weight: bold;">{conv_id}</code>
                     </div>
-                    """,
-                    unsafe_allow_html=True
-                )
+                """, unsafe_allow_html=True)
 
-                # Execute the Graph
-                current_prompt = st.session_state.pending_prompt
+        model = st.selectbox("Choose model", ["gemma4:e4b", "phi3:mini"], disabled=st.session_state.processing)
+        st.divider()
+        files = st.file_uploader("Upload PDFs", type="pdf", accept_multiple_files=True,
+                                 disabled=st.session_state.processing)
+        if st.button("Clear Session", disabled=st.session_state.processing):
+            clear_session()
+
+    # Main Chat
+    st.subheader("PDF Assistant")
+    status_container = st.empty()
+
+    # Display History
+    for i, msg in enumerate(st.session_state.messages):
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+            # 1. Check if the message is from the Assistant
+            if msg["role"] == "Assistant":
+                index = get_feedback_interaction_index(i)
+                # 2. Only show buttons if feedback hasn't been given yet
+                if index not in st.session_state.feedback_scores:
+                    # Use columns to keep buttons small and side-by-side
+                    col1, col2, _ = st.columns([0.05, 0.05, 0.9])
+
+                    with col1:
+                        if st.button("👍", key=f"up_{index}"):
+                            # Log the positive feedback
+                            st.session_state.feedback_scores[index] = "thumb_up"
+                            st.rerun()  # Refresh to hide buttons
+
+                    with col2:
+                        if st.button("👎", key=f"down_{index}"):
+                            # Log the negative feedback
+                            st.session_state.feedback_scores[index] = "thumb_down"
+                            st.rerun()  # Refresh to hide buttons
+
+    # add the gif if processing is on going
+    # Create an empty placeholder for the loading state
+    loading_placeholder = st.empty()
+    if st.session_state.processing:
+        # Replace the placeholder with a GIF
+        with loading_placeholder.container():
+            st.markdown(
+                """
+                <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 20px;">
+                    <img src="https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExNHJueXF4ZzRnd3B6eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4JmVwPXYxX2ludGVybmFsX2dpZl9ieV9pZCBjdXN0b20mY3Q9Zw/3o7bu3XilJ5BOiSGic/giphy.gif" width="100">
+                    <p style="color: #117aca; font-weight: bold; margin-top: 10px;">Bot is thinking...</p>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+            # Execute the Graph
+            current_prompt = st.session_state.pending_prompt
+            try:
                 bot = get_chatbot(model)  # 'model' comes from your sidebar selectbox
                 temp_paths = process_uploaded_files(files)  # 'files' comes from your sidebar uploader
 
                 run_pipeline(bot, current_prompt, temp_paths, status_container)
+            except Exception as e:
 
-                # 2. THE CLEANUP
-                st.session_state.pending_prompt = None
-                st.session_state.processing = False
-                st.rerun()  # Final rerun to unlock the UI and show the new message
+                # st.stop()  # Safely stops execution without killing the app [6]
+                logging.error(e)
+                logging.shutdown()
+                trace_manager.save_metadata()
+
+            # 2. THE CLEANUP
+            st.session_state.pending_prompt = None
+            st.session_state.processing = False
+            st.rerun()  # Final rerun to unlock the UI and show the new message
+
+    else:
+        # Clear the GIF immediately after response
+        loading_placeholder.empty()
+
+    # Input handling
+    if prompt := st.chat_input("Ask a question...", disabled=st.session_state.processing):
+
+        if len(prompt) > 10000:
+            st.error(
+                f"Input too long! Your request is {len(prompt)} characters, but the limit is 10,000. "
+                f"Please shorten your content and question.")
+            st.stop()  # Prevents the rest of the code from running
 
         else:
-            # Clear the GIF immediately after response
-            loading_placeholder.empty()
+            st.session_state.messages.append({"role": "User", "content": prompt})
+            # Store the pending prompt and lock the UI
+            st.session_state.pending_prompt = prompt
+            st.session_state.processing = True
+            st.rerun()  # This stops execution and re-renders the UI with EVERYTHING disabled
 
-        # Input handling
-        if prompt := st.chat_input("Ask a question...", disabled=st.session_state.processing):
-
-            if len(prompt) > 10000:
-                st.error(
-                    f"Input too long! Your request is {len(prompt)} characters, but the limit is 10,000. "
-                    f"Please shorten your content and question.")
-                st.stop()  # Prevents the rest of the code from running
-
-            else:
-                st.session_state.messages.append({"role": "User", "content": prompt})
-                # Store the pending prompt and lock the UI
-                st.session_state.pending_prompt = prompt
-                st.session_state.processing = True
-                st.rerun()  # This stops execution and re-renders the UI with EVERYTHING disabled
-
-    except Exception as e:
-        st.error("An error occurred. Please check your logs")
-        # st.exception(e)  # Displays full traceback in app [5]
-        st.stop()  # Safely stops execution without killing the app [6]
-        logging.error(e)
-        logging.shutdown()
+    for each_key in st.session_state.feedback_scores.keys():
+        trace_manager.track_user_feedback(each_key, st.session_state.feedback_scores[each_key])
 
 
 if __name__ == "__main__":
     main()
+    trace_manager.save_metadata()

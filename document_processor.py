@@ -28,7 +28,7 @@ class DocumentProcessor(ABC):
             raise IOError(f"File {file_path} size {self._file_size} is greater than {DocumentProcessor.MAX_SIZE_MB}")
 
         self._text_redactor = TextRedactor()
-        self._image_redactor = ImageRedactor()
+        self._image_redactor = ImageRedactor(self._text_redactor)
 
     @property
     def file_hash(self):

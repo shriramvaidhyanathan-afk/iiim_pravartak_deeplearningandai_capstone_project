@@ -37,8 +37,10 @@ class TraceabilityManager:
         self.doc_images_path = self.doc_path / "images"
         self.doc_text_path = self.doc_path / "text"
         self.logs_path = self.conv_path / "logs"
+        self.prompts_path = self.conv_path / "prompts"
         self.model_name = None
         self._internal_prompts_responses = []
+        self.user_feedback = ""
 
         # Initialize folder structure
         self._setup_folders()
@@ -48,7 +50,7 @@ class TraceabilityManager:
         logger.setLevel(logging.DEBUG)
 
         c_handler = logging.StreamHandler()  # Console
-        f_handler = logging.FileHandler(self.logs_path / 'traceability___{TraceabilityManager._get_current_time()}.log')
+        f_handler = logging.FileHandler(self.logs_path / f'traceability___{TraceabilityManager._get_current_time()}.log')
         c_handler.setLevel(logging.WARNING)  # Only show warnings+ in console
         f_handler.setLevel(logging.INFO)  # Save info+ in file
 
@@ -65,7 +67,7 @@ class TraceabilityManager:
         self.history = {
             "conversation_id": self.conversation_id,
             "start_time": datetime.now().isoformat(),
-            "interactions": []
+            "interactions": {}
         }
         logging.info(f"Traceability Session Initialized: {self.conversation_id}")
 
@@ -84,7 +86,8 @@ class TraceabilityManager:
             self.doc_path,
             self.doc_text_path,
             self.doc_images_path,
-            self.logs_path
+            self.logs_path,
+            self.prompts_path
         ]
         for p in paths:
             p.mkdir(parents=True, exist_ok=True)
@@ -110,8 +113,8 @@ class TraceabilityManager:
         }
 
         file_name = f"{file_prefix}___{TraceabilityManager._get_current_time()}.json"
-        with open(self.doc_text_path / {file_name}, "w") as f:
-            json.dump(entry, indent=4)
+        with open(self.doc_text_path / file_name, "w") as f:
+            json.dump(entry, f, indent=4)
 
     def track_file(self, original_path: str):
         """Copies the uploaded PDF into the traceability folder."""
@@ -120,21 +123,29 @@ class TraceabilityManager:
         shutil.copy(original_path, dest)
         return str(dest)
 
-    def track_interaction(self, user_input: str, assistant_output: str):
+    def track_interaction(self, interaction_id, user_input: str, user_redacted_input: str, assistant_output: str):
         """Records a single Q&A turn."""
         entry = {
             "timestamp": datetime.now().isoformat(),
             "model": self.model_name,
             "user_prompt": user_input,
+            "user_redacted_prompt": user_redacted_input,
             "internal_prompts_responses": self._internal_prompts_responses,
-            "response": assistant_output
+            "response": assistant_output,
+            "user_feedback": ""
         }
-        self.history["interactions"].append(entry)
-        with open(self.logs_path / f"interactionmetadata.json", "w") as f:
-            json.dump(self.history, f, indent=4)
+        self.history["interactions"][interaction_id] = entry
+
+    def track_user_feedback(self, interaction_id, user_feedback: str):
+        self.history["interactions"][interaction_id]["user_feedback"] = user_feedback
 
     def get_conversation_id(self):
         return self.conversation_id
 
+    def save_metadata(self):
+        with open(self.prompts_path / f"interactionmetadata.json", "w") as f:
+            json.dump(self.history, f, indent=4)
+
 
 trace_manager = TraceabilityManager()
+

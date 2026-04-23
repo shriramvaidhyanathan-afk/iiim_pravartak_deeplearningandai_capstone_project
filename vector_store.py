@@ -2,7 +2,7 @@ import os
 import shutil
 import logging
 from langchain_chroma import Chroma
-from langchain_classic.chat_models import ollama
+import ollama
 from langchain_core.documents import Document
 from langchain_ollama import OllamaEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -51,7 +51,7 @@ class VectorStore:
         self._persistent_path = persistent_path
         self._cleanup()
         self._collections = {}
-        self._text_embeddings = OllamaEmbeddings(model="qwen3-embedding:4b", keep_alive=900)
+        self._text_embeddings = OllamaEmbeddings(model="qwen3-embedding:4b", keep_alive="900")
         self._processed_document_hashes = set()
 
     def add_document(self, document_processor: DocumentProcessor, document_type: DocumentType):
