@@ -1,5 +1,6 @@
 import logging
 import traceback
+import hashlib
 
 import streamlit as st
 import os
@@ -7,6 +8,13 @@ import tempfile
 from graph import ChatBot, ChatHistory
 from redactor import TextRedactor
 from traceabilitymanager import trace_manager, TraceabilityManager
+from vector_store import VectorStore
+from ai_abstractions import ModelConfig, Provider
+from ai_factory import (
+    build_provider_bundle,
+    get_google_embedding_models,
+    get_google_flash_chat_models,
+)
 
 
 # --- 1. CONFIGURATION & STYLES ---
@@ -36,11 +44,41 @@ def sanitize_markdown(text: str) -> str:
 
 
 @st.cache_resource
-def get_chatbot(model_name):
+def get_chatbot(provider_name, chat_model_name, embedding_model_name):
     """Initializes the ChatBot once and caches it across reruns."""
-    chat_bot = ChatBot(model_name=model_name)
-    trace_manager.model_name = model_name
+    config = ModelConfig(
+        provider=Provider(provider_name),
+        chat_model=chat_model_name,
+        embedding_model=embedding_model_name,
+    )
+    # Isolate Chroma persistence by provider + embedding model to avoid
+    # dimension collisions when switching between vendors/models.
+    embedding_key = hashlib.md5(
+        f"{provider_name}:{embedding_model_name}".encode("utf-8")
+    ).hexdigest()[:12]
+    persistent_path = f"./chroma_db/{provider_name}_{embedding_key}"
+
+    provider_bundle = build_provider_bundle(config)
+    vector_store = VectorStore(
+        embeddings=provider_bundle.embeddings,
+        image_captioner=provider_bundle.image_captioner,
+        persistent_path=persistent_path,
+    )
+    chat_bot = ChatBot(llm_client=provider_bundle.llm, vector_store=vector_store)
+    trace_manager.model_name = chat_model_name
     return chat_bot.build_graph()
+
+
+@st.cache_data(ttl=300)
+def get_google_flash_models_for_ui():
+    """Caches model discovery to avoid repeated API calls on every rerun."""
+    return get_google_flash_chat_models()
+
+
+@st.cache_data(ttl=300)
+def get_google_embedding_models_for_ui():
+    """Caches embedding model discovery to avoid repeated API calls on every rerun."""
+    return get_google_embedding_models()
 
 
 # --- 3. STATE MANAGEMENT ---
@@ -62,6 +100,8 @@ def initialize_session():
             "chat_history": ChatHistory(),
             "cancel_run": False
         }
+    if "status_banner" not in st.session_state:
+        st.session_state.status_banner = None
 
 
 def clear_session():
@@ -79,6 +119,7 @@ def clear_session():
     }
     trace_manager.hard_reset()
     st.session_state.feedback_scores = {}
+    st.session_state.status_banner = None
     st.rerun()
 
 
@@ -128,13 +169,15 @@ def run_pipeline(bot, prompt, temp_paths, status_placeholder):
         index = get_feedback_interaction_index(len(st.session_state.messages)) - 1
         trace_manager.track_interaction(index, prompt, state["current_request"],
                                         response_state["current_response"])
+        st.session_state.status_banner = None
+        status_placeholder.empty()
 
     except Exception as e:
-        st.error(f"Error: {str(e)}")
-        message = "An error occurred. Please check the logs"
-        st.session_state.messages.append({"role": "Assistant", "content": message})
-        trace_manager.track_interaction(prompt, state["current_request"], message)
         logging.error(e, exc_info=True)
+        message = f"There was a problem: {str(e)}"
+        st.session_state.status_banner = message
+        status_placeholder.error(message)
+
 
     finally:
         for p in temp_paths:
@@ -159,7 +202,70 @@ def main():
                     </div>
                 """, unsafe_allow_html=True)
 
-        model = st.selectbox("Choose model", ["gemma4:e4b", "phi3:mini"], disabled=st.session_state.processing)
+        provider_name = st.selectbox("Choose provider", ["ollama", "google"], disabled=st.session_state.processing)
+        if provider_name == "ollama":
+            chat_model = st.selectbox("Choose chat model", ["gemma4:e4b"], disabled=st.session_state.processing)
+            embedding_model = st.selectbox("Choose embedding model", ["qwen3-embedding:4b"], disabled=st.session_state.processing)
+        else:
+            flash_models = []
+            flash_fetch_error = None
+            try:
+                flash_models = get_google_flash_models_for_ui()
+            except Exception as e:
+                flash_fetch_error = str(e)
+
+            if flash_fetch_error:
+                st.warning(f"Could not auto-fetch Flash models: {flash_fetch_error}")
+                chat_model = st.text_input(
+                    "Google chat model id",
+                    value="gemini-2.0-flash",
+                    disabled=st.session_state.processing,
+                    help="Use a model id available for your API key.",
+                )
+            else:
+                if not flash_models:
+                    st.warning("No Flash chat models were returned for this API key.")
+                    chat_model = st.text_input(
+                        "Google chat model id",
+                        value="gemini-2.0-flash",
+                        disabled=st.session_state.processing,
+                    )
+                else:
+                    chat_model = st.selectbox(
+                        "Google chat model id (Flash)",
+                        flash_models,
+                        disabled=st.session_state.processing,
+                    )
+
+            embedding_models = []
+            embedding_fetch_error = None
+            try:
+                embedding_models = get_google_embedding_models_for_ui()
+            except Exception as e:
+                embedding_fetch_error = str(e)
+
+            if embedding_fetch_error:
+                st.warning(f"Could not auto-fetch embedding models: {embedding_fetch_error}")
+                embedding_model = st.text_input(
+                    "Google embedding model id",
+                    value="text-embedding-004",
+                    disabled=st.session_state.processing,
+                    help="Use an embedding model id available for your API key.",
+                )
+            else:
+                if not embedding_models:
+                    st.warning("No embedding-capable models were returned for this API key.")
+                    embedding_model = st.text_input(
+                        "Google embedding model id",
+                        value="text-embedding-004",
+                        disabled=st.session_state.processing,
+                    )
+                else:
+                    embedding_model = st.selectbox(
+                        "Google embedding model id",
+                        embedding_models,
+                        disabled=st.session_state.processing,
+                    )
         st.divider()
         files = st.file_uploader("Upload PDFs", type="pdf", accept_multiple_files=True,
                                  disabled=st.session_state.processing)
@@ -169,6 +275,8 @@ def main():
     # Main Chat
     st.subheader("PDF Assistant")
     status_container = st.empty()
+    if st.session_state.status_banner:
+        status_container.error(st.session_state.status_banner)
 
     # Display History
     for i, msg in enumerate(st.session_state.messages):
@@ -214,15 +322,15 @@ def main():
             # Execute the Graph
             current_prompt = st.session_state.pending_prompt
             try:
-                bot = get_chatbot(model)  # 'model' comes from your sidebar selectbox
+                bot = get_chatbot(provider_name, chat_model, embedding_model)
                 temp_paths = process_uploaded_files(files)  # 'files' comes from your sidebar uploader
 
                 run_pipeline(bot, current_prompt, temp_paths, status_container)
             except Exception as e:
-
-                # st.stop()  # Safely stops execution without killing the app [6]
-                logging.error(e)
-                logging.shutdown()
+                message = f"There was a problem: {str(e)}"
+                st.session_state.status_banner = message
+                status_container.error(message)
+                logging.error(e, exc_info=True)
                 trace_manager.save_metadata()
 
             # 2. THE CLEANUP
