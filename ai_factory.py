@@ -159,8 +159,7 @@ def build_provider_bundle(config: ModelConfig) -> AIProviderBundle:
             embeddings=OllamaEmbeddingClient(
                 model=config.embedding_model,
                 keep_alive_seconds=config.keep_alive_seconds,
-            ),
-            image_captioner=OllamaImageCaptioner(),
+            )
         )
 
     if config.provider == Provider.GOOGLE:

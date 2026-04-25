@@ -1,0 +1,29 @@
+graph TD
+    %% Start and End nodes
+    START((START))
+    END((END))
+
+    %% Defined Nodes
+    classify[classify_node]
+    process_doc[process_doc_node]
+    answer[answer_node]
+
+    %% Conditional Routing Logic from START
+    START --> start_logic{start_routing_logic}
+    start_logic -- "PDFs detected" --> classify
+    start_logic -- "No PDFs or no new PDFs" --> answer
+
+    %% Conditional Routing Logic from Classify
+    classify --> classify_logic{classify_routing_logic}
+    classify_logic -- "PDFs to be processed" --> process_doc
+    classify_logic -- "Prompt length is greater than threshold" --> END
+
+    %% Standard Edges
+    process_doc --> answer
+    answer --> END
+
+    %% Styling
+    style START fill:#f9f,stroke:#333,stroke-width:2px
+    style END fill:#f9f,stroke:#333,stroke-width:2px
+    style start_logic fill:#fff4dd,stroke:#d4a017,stroke-dasharray: 5 5
+    style classify_logic fill:#fff4dd,stroke:#d4a017,stroke-dasharray: 5 5

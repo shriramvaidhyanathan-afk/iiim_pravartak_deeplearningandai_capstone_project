@@ -38,9 +38,7 @@ class TextRedactor(BaseRedactor):
         # Define specific behaviors for common PII
         self.operators = {
             "PERSON": OperatorConfig("replace", {"new_value": "<NAME>"}),
-            "ORG": OperatorConfig("replace", {"new_value": "<COMPANY>"}),
             "EMAIL_ADDRESS": OperatorConfig("replace", {"new_value": "<EMAIL>"}),
-            "LOCATION": OperatorConfig("replace", {"new_value": "<LOCATION>"}),
             "PHONE_NUMBER": OperatorConfig("replace", {"new_value": "<PHONENUMBER>"}),
         }
 
@@ -51,7 +49,7 @@ class TextRedactor(BaseRedactor):
         results = self.analyzer.analyze(
             text=text,
             language='en',
-            entities=["PERSON", "ORG", "EMAIL_ADDRESS", "LOCATION", "PHONE_NUMBER"]
+            entities=["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER"]
         )
 
         anonymized = self.anonymizer.anonymize(

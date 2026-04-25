@@ -35,6 +35,7 @@ class TraceabilityManager:
         self.conv_path = self.base_dir / self.conversation_id
         self.doc_path = self.conv_path / "documents"
         self.doc_images_path = self.doc_path / "images"
+        self.doc_images_text_path = self.doc_images_path / "text"
         self.doc_text_path = self.doc_path / "text"
         self.logs_path = self.conv_path / "logs"
         self.prompts_path = self.conv_path / "prompts"
@@ -96,25 +97,31 @@ class TraceabilityManager:
     def _get_current_time():
         return datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    def add_original_redacted_image(self, original_img, redacted_img, file_prefix):
+    def add_original_redacted_image(self, original_img, redacted_img, file_prefix, page_number, image_index):
         current_datetime = TraceabilityManager._get_current_time()
-        original_file_path = self.doc_images_path / f"{file_prefix}___original___{current_datetime}.png"
-        redacted_file_path = self.doc_images_path / f"{file_prefix}___redacted___{current_datetime}.png"
+        original_file_path = self.doc_images_path / f"{file_prefix}___{page_number}___{image_index}___original.png"
+        redacted_file_path = self.doc_images_path / f"{file_prefix}___{page_number}___{image_index}___redacted.png"
         with open(original_file_path, "wb") as f:
             f.write(original_img)
         with open(redacted_file_path, "wb") as f:
             f.write(redacted_img)
 
-    def add_original_redacted_text(self, original: str, redacted: str, file_prefix):
+    def add_original_redacted_text(self, original: str, redacted: str, file_prefix, page_number, image_index=None,
+                                   is_image_text=False):
         entry = {
             "timestamp": datetime.now().isoformat(),
             "original": original,
             "redacted": redacted
         }
 
-        file_name = f"{file_prefix}___{TraceabilityManager._get_current_time()}.json"
-        with open(self.doc_text_path / file_name, "w") as f:
-            json.dump(entry, f, indent=4)
+        if not is_image_text:
+            file_name = f"{file_prefix}___{page_number}.json"
+            with open(self.doc_text_path / file_name, "w") as f:
+                json.dump(entry, f, indent=4)
+        else:
+            file_name = f"{file_prefix}___{page_number}___{image_index}.json"
+            with open(self.doc_text_path / file_name, "w") as f:
+                json.dump(entry, f, indent=4)
 
     def track_file(self, original_path: str):
         """Copies the uploaded PDF into the traceability folder."""

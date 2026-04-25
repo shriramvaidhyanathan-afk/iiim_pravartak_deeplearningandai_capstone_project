@@ -61,7 +61,6 @@ def get_chatbot(provider_name, chat_model_name, embedding_model_name):
     provider_bundle = build_provider_bundle(config)
     vector_store = VectorStore(
         embeddings=provider_bundle.embeddings,
-        image_captioner=provider_bundle.image_captioner,
         persistent_path=persistent_path,
     )
     chat_bot = ChatBot(llm_client=provider_bundle.llm, vector_store=vector_store)

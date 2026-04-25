@@ -1,14 +1,14 @@
 import os
 from enum import Enum
-from langchain_ollama import ChatOllama
 from langgraph.constants import START, END
 from langgraph.graph import StateGraph
 from document_processor import PDFDocumentProcessor
 from vector_store import VectorStore, DocumentType
 import logging
-from typing import Literal, List, Annotated, TypedDict
+from typing import Literal, List, Annotated, TypedDict, Callable
 from pydantic import BaseModel, Field
 from traceabilitymanager import trace_manager
+from ai_abstractions import LLMClient
 
 
 class Role(str, Enum):
@@ -74,9 +74,16 @@ class ChatState(TypedDict):
 
 
 class ChatBot:
-    def __init__(self, model_name: str, max_prompt_len=50000, temperature=0):
-        self.llm = ChatOllama(model=model_name, temperature=temperature, keep_alive=900)
-        self._vector_store: VectorStore = VectorStore()
+    def __init__(
+        self,
+        llm_client: LLMClient,
+        vector_store: VectorStore,
+        document_processor_factory: Callable[[str], PDFDocumentProcessor] = PDFDocumentProcessor,
+        max_prompt_len=10000,
+    ):
+        self.llm = llm_client
+        self._vector_store: VectorStore = vector_store
+        self._document_processor_factory = document_processor_factory
         self._max_prompt_len = max_prompt_len
 
     def _check_prompt_len(self, prompt):
@@ -87,12 +94,12 @@ class ChatBot:
         return False
 
     def classify_node(self, state: ChatState):
-        """Classifies documents and pauses for user confirmation."""
+        """Classifies documents"""
         sample = ""
         for each_pdf_file_path in state["uploaded_pdf_paths"]:
             # Ask LLM to classify based on first 1000 chars
             sample = f"{sample}\nPDF Name: {os.path.basename(each_pdf_file_path)} Sample Text: " \
-                     f"{PDFDocumentProcessor(each_pdf_file_path).get_sample_text()}"
+                     f"{self._document_processor_factory(each_pdf_file_path).get_sample_text()}"
 
         prompt = f"Classify the PDF strictly as one of the following categories: Legal, Technical, " \
                  f"Financial, or General." \
@@ -114,37 +121,39 @@ class ChatBot:
                  f"\n\nSee if the below information from user has any information that helps you classify it better." \
                  f"\n{state['current_request']}" \
 
-        return_value = {
-            "chat_history": ChatHistory(role=Role.USER, content=state["current_request"])
-        }
+        user_turn = ChatHistory()
+        user_turn.add_message(Role.USER, state["current_request"])
+        return_value = {"chat_history": user_turn}
 
         if self._check_prompt_len(prompt):
-            res = self.llm.invoke(prompt)
-            trace_manager.add_internal_prompt_response(prompt, res.content)
+            response = self.llm.generate(prompt)
+            trace_manager.add_internal_prompt_response(prompt, response)
             logging.info(f"Prompt: {prompt} ")
             try:
-                document_type = DocumentType.from_string(res.content)
-                logging.info(f"File {each_pdf_file_path} has been classified as a {res.content}")
+                document_type = DocumentType.from_string(response)
+                logging.info(f"File {each_pdf_file_path} has been classified as a {response}")
                 return_value["current_document_type"] = document_type
                 return_value["current_status"] = "Answering the question..."
 
             except ValueError:
                 logging.info(
-                    f"File {each_pdf_file_path} count not classified as suggested by the LLM {res.content} "
+                    f"File {each_pdf_file_path} count not classified as suggested by the LLM {response} "
                     f"so marking it as GENERAL")
                 return_value["current_document_type"] = DocumentType.GENERAL
                 return_value["current_status"] = "Answering the question..."
         else:
-            response = "Prompt exceeded the max length allowed"
+            response = "Prompt exceeded the max length allowed. Please clear the session and try again."
             return_value["cancel_run"] = True
             return_value["current_response"] = response
-            return_value["chat_history"] = ChatHistory(role=Role.ASSISTANT, content=response)
+            assistant_turn = ChatHistory()
+            assistant_turn.add_message(Role.ASSISTANT, response)
+            return_value["chat_history"] = assistant_turn
 
         return return_value
 
     def process_doc_node(self, state: ChatState):
         for each_pdf_file_path in state["uploaded_pdf_paths"]:
-            document_processor = PDFDocumentProcessor(each_pdf_file_path)
+            document_processor = self._document_processor_factory(each_pdf_file_path)
             self._vector_store.add_document(document_processor, state["current_document_type"])
             return {
                 "uploaded_pdf_paths": [],
@@ -202,11 +211,13 @@ class ChatBot:
                      f"\n'Chat History:'" \
                      f"\n{state['chat_history'].all_content}"
 
-            res = self.llm.invoke(prompt)
-            trace_manager.add_internal_prompt_response(prompt, res.content)
+            response = self.llm.generate(prompt)
+            trace_manager.add_internal_prompt_response(prompt, response)
+            assistant_turn = ChatHistory()
+            assistant_turn.add_message(Role.ASSISTANT, response)
             return {
-                "current_response": res.content,
-                "chat_history": ChatHistory(role=Role.ASSISTANT, content=res.content)
+                "current_response": response,
+                "chat_history": assistant_turn
             }
 
     def start_routing_logic(self, state: ChatState) -> Literal["classify", "answer"]:

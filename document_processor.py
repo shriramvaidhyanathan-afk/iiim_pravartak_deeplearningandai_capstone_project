@@ -1,10 +1,12 @@
 import os
 import hashlib
 from abc import ABC, abstractmethod
-from typing import Generator, Dict, Any
+from typing import Generator, Dict, Any, List
 import fitz
 from langchain_core.documents import Document
 import logging
+
+from ai_factory import OllamaImageCaptioner
 from redactor import ImageRedactor, TextRedactor
 from traceabilitymanager import trace_manager
 
@@ -29,6 +31,7 @@ class DocumentProcessor(ABC):
 
         self._text_redactor = TextRedactor()
         self._image_redactor = ImageRedactor(self._text_redactor)
+        self._image_captioner = OllamaImageCaptioner()
 
     @property
     def file_hash(self):
@@ -93,10 +96,11 @@ class PDFDocumentProcessor(DocumentProcessor):
             full_sample = "".join(sample_accumulator)
             sample_text = full_sample[:max_chars]
             safe_text = self._text_redactor.redact(sample_text)
-            trace_manager.add_original_redacted_text(sample_text, safe_text, self._file_name)
+            trace_manager.add_original_redacted_text(sample_text, safe_text, self._file_name, 1)
             return safe_text
 
     def load(self) -> Generator:
+        documents = []
         if not self._file_path.lower().endswith('.pdf'):
             raise ValueError("Provided file is not a PDF.")
         with fitz.open(self._file_path) as pdf_doc:
@@ -104,49 +108,53 @@ class PDFDocumentProcessor(DocumentProcessor):
             for page_num, page in enumerate(pdf_doc):
                 # 1. Extract raw text
                 raw_text = page.get_text()
-
+                actual_page_num = page_num + 1
                 # 2. Redact text using Presidio logic
                 logging.info(f"Redacting text on page {page_num + 1}...")
                 safe_text = self._text_redactor.redact(raw_text)
 
-                trace_manager.add_original_redacted_text(raw_text, safe_text, self._file_name)
+                trace_manager.add_original_redacted_text(raw_text, safe_text, self._file_name, actual_page_num)
 
-                yield Document(
+                documents.append(Document(
                     page_content=safe_text,
                     metadata={
                         "source": self._file_name,
-                        "page": page_num + 1,
+                        "page": actual_page_num,
                         "total_pages": total_pages,
                         "type": "text_content"
-                    }
-                )
+                    }))
 
-    def load_images(self) -> Generator[Dict[str, Any], None, None]:
-        """
-        Extracts images as bytes for multimodal processing.
-        Uses a context manager to ensure proper resource cleanup on M1 Pro.
-        """
-        with fitz.open(self._file_path) as doc:
-            for page_num in range(len(doc)):
-                page = doc.load_page(page_num)
-
+                # process the images in the page
                 for img_index, img in enumerate(page.get_images(full=True)):
                     xref = img[0]
-                    base_image = doc.extract_image(xref)
+                    base_image = pdf_doc.extract_image(xref)
                     raw_bytes = base_image["image"]
 
-
                     # --- REDACTION STEP: Images ---
-                    logging.info(f"Checking Image {img_index} on Page {page_num + 1} for PII...")
-                    safe_image_bytes = self._image_redactor.redact(raw_bytes)
+                    logging.info(f"Checking Image {img_index} on Page {actual_page_num} for PII...")
+                    image_bytes = self._image_redactor.redact(raw_bytes)
 
-                    trace_manager.add_original_redacted_image(raw_bytes, safe_image_bytes, self._file_name)
+                    trace_manager.add_original_redacted_image(raw_bytes, image_bytes, self._file_name,
+                                                              actual_page_num, img_index)
 
-                    yield {
-                        "source": self._file_name,
-                        "image_bytes": safe_image_bytes,
-                        "page": page_num + 1,
-                        "index": img_index,
-                        "extension": base_image["ext"]
-                    }
+                    logging.info(f"Captioning image on page {actual_page_num}...")
+
+                    # 1. Use Moondream to describe the image
+                    caption = self._image_captioner.caption(image_bytes)
+
+                    safe_text = self._text_redactor.redact(caption)
+                    trace_manager.add_original_redacted_text(caption, safe_text, self._file_name, actual_page_num,
+                                                             img_index, True)
+
+                    documents.append(Document(
+                        page_content=f"[IMAGE DESCRIPTION]: {caption}",
+                        metadata={
+                            "source": self._file_name,
+                            "page": actual_page_num,
+                            "type": "visual_element",
+                            "original_index": img_index
+                        }
+                    ))
+
+            yield documents
 

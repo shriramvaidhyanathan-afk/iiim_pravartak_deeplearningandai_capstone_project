@@ -2,13 +2,13 @@ import os
 import shutil
 import logging
 from langchain_chroma import Chroma
-import ollama
 from langchain_core.documents import Document
-from langchain_ollama import OllamaEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from document_processor import DocumentProcessor
 from enum import Enum
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
+from ai_abstractions import EmbeddingClient, ImageCaptioner
+from traceabilitymanager import trace_manager
 
 
 class DocumentType(Enum):
@@ -47,12 +47,19 @@ class VectorStore:
             logging.info("--- Clearing existing database ---")
             shutil.rmtree(self._persistent_path)
 
-    def __init__(self, persistent_path: str = "./chroma_db"):
+    def __init__(
+        self,
+        embeddings: EmbeddingClient,
+        persistent_path: str = "./chroma_db"
+    ):
         self._persistent_path = persistent_path
-        self._cleanup()
         self._collections = {}
-        self._text_embeddings = OllamaEmbeddings(model="qwen3-embedding:4b", keep_alive="900")
+        self._text_embeddings = embeddings
         self._processed_document_hashes = set()
+
+    def reset_persistence(self):
+        """Optional explicit cleanup for local development resets."""
+        self._cleanup()
 
     def add_document(self, document_processor: DocumentProcessor, document_type: DocumentType):
         if document_processor is None:
@@ -81,14 +88,11 @@ class VectorStore:
 
         document_loader = document_processor.load()
         all_chunks = []
-        for each_page in document_loader:
-            # Process one page at a time (e.g., split and add to ChromaDB)
-            chunks = text_splitter.split_documents([each_page])
-            all_chunks.extend(chunks)
-
-        logging.info(f"Extracting and captioning images for {collection_name}...")
-        image_chunks = self._process_pdf_images(document_processor)
-        all_chunks.extend(image_chunks)
+        for each_doc_collection in document_loader:
+            for each_document in each_doc_collection:
+                # Process one page at a time (e.g., split and add to ChromaDB)
+                chunks = text_splitter.split_documents([each_document])
+                all_chunks.extend(chunks)
 
         # Using a batch_size of 100 provides the best balance for 16GB RAM
         batch_size = 100
@@ -125,38 +129,3 @@ class VectorStore:
 
         return "\n\n".join(context_parts)
 
-    def _process_pdf_images(self, processor) -> List[Document]:
-        """
-        Extracts images, captions them with Moondream, and prepares
-        them for Qwen embedding.
-        """
-        image_documents = []
-
-        for img_data in processor.load_images():
-            # Moondream via Ollama accepts image bytes directly
-            img_bytes = img_data["image_bytes"]
-
-            logging.info(f"Captioning image on page {img_data['page']}...")
-
-            # 1. Use Moondream to describe the image
-            response = ollama.generate(
-                model='moondream',
-                prompt='Describe this technical chart, diagram, or image in detail for a searchable database. '
-                       'Focus on labels and data.',
-                images=[img_bytes], keep_alive="15m"
-            )
-            caption = response['response']
-
-            # 2. Create a Document object where the text is the caption
-            # This text will be embedded by Qwen automatically in add_document
-            image_documents.append(Document(
-                page_content=f"[IMAGE DESCRIPTION]: {caption}",
-                metadata={
-                    "source": processor.file_path,
-                    "page": img_data["page"],
-                    "type": "visual_element",
-                    "original_index": img_data["index"]
-                }
-            ))
-
-        return image_documents
